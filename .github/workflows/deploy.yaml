@@ -1,0 +1,151 @@
+name: Deploy Challenge
+
+on:
+  workflow_dispatch:
+    # Optional params
+    inputs:
+      IPAllocationId:
+        description: 'Elastic IP Allocation ID'
+        required: false
+        default: 'eipalloc-04e606de031eded72'
+      Prefix:
+        description: 'Prefix for the CloudFormation stack'
+        required: false
+        default: 'ctf-cloudy'
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    env:
+      IP_ALLOCATION_ID: ${{ github.event.inputs.IPAllocationId }}
+      PREFIX: ${{ github.event.inputs.Prefix }}
+      SSH_USER: admin
+      AWS_REGION: eu-central-1
+      DEBUG: false
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y awscli
+
+      - name: Configure AWS creds
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check if the stack to be created already exists
+        id: check-stack
+        continue-on-error: true
+        run: |
+          STACK_OUTPUT=$(aws cloudformation describe-stacks --stack-name $PREFIX 2>&1)
+
+          if [ $? -eq 0 ]; then
+            echo "Stack $PREFIX already exists"
+            echo "Deleting stack $PREFIX"
+            aws s3 rm s3://$PREFIX-bucket --recursive
+            aws cloudformation delete-stack --stack-name $PREFIX
+            aws cloudformation wait stack-delete-complete --stack-name $PREFIX
+          else
+            echo "Stack $PREFIX does not exist"
+          fi
+
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      IP_ALLOCATION_ID: ${{ github.event.inputs.IPAllocationId }}
+      PREFIX: ${{ github.event.inputs.Prefix }}
+      SSH_USER: admin
+      AWS_REGION: eu-central-1
+      DEBUG: false
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup SSH
+        run: |
+          sudo apt update
+          sudo apt install -y rsync sshpass
+          echo "${{ secrets.SSH_KEY }}" > /tmp/id_rsa
+          chmod 600 /tmp/id_rsa
+
+      - name: Configure AWS creds
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create CloudFormation Stack
+        id: create-stack
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: $PREFIX
+          region: eu-central-1
+          capabilities: CAPABILITY_NAMED_IAM
+          template: ./stack.yaml
+          parameters: |
+            Prefix=$PREFIX
+            ElasticIPAllocationId=$IP_ALLOCATION_ID
+
+      - name: Deploy Nginx to EC2
+        run: |
+          if $DEBUG; then set -x; fi
+
+          # Get the outputs from the CloudFormation stack step
+          LAMBDA_FUNCTION_URL=${{ steps.create-stack.outputs.LambdaFunctionUrl }}
+          S3_BUCKET_NAME=${{ steps.create-stack.outputs.BucketName }}
+          REMOTE_HOST=${{ steps.create-stack.outputs.EC2InstancePublicIP }}
+
+          LAMBDA_FUNCTION_URL_ID=$(echo $LAMBDA_FUNCTION_URL | cut -d'/' -f3 | cut -d'.' -f1)
+
+          if [ -z "$LAMBDA_FUNCTION_URL_ID" ]; then
+            echo "Stack creation did not return a valid Lambda function URL ID"
+            exit 1
+          fi
+
+          if [ -z "$S3_BUCKET_NAME" ]; then
+            echo "Stack creation did not return a valid S3 bucket name"
+            exit 1
+          fi
+
+          # Install dependencies
+          ssh -o StrictHostKeyChecking=no -i /tmp/id_rsa $SSH_USER@$IP << EOF
+            sudo apt-get update
+            sudo apt-get install -y nginx
+            sudo cp /home/$SSH_USER/.ssh/authorized_keys /root/.ssh/authorized_keys
+          EOF
+
+          # Copy source files
+          scp -o StrictHostKeyChecking=no -i /tmp/id_rsa ./nginx.conf root@$IP:/etc/nginx/nginx.conf
+          scp -o StrictHostKeyChecking=no -i /tmp/id_rsa ./index.html root@$IP:/tmp/index.html
+
+          # Configure and start Nginx
+          ssh -o StrictHostKeyChecking=no -i /tmp/id_rsa root@$REMOTE_HOST << EOF
+            export S3_BUCKET_NAME=$S3_BUCKET_NAME
+            export LAMBDA_FUNCTION_URL_ID=$LAMBDA_FUNCTION_URL_ID
+            envsubst < /tmp/index.html > /var/www/html/index.html
+            sudo systemctl restart nginx
+          EOF
+
+      - name: Put flag
+        env:
+          FLAG: ${{ secrets.FLAG }}
+          S3_BUCKET_NAME: ${{ steps.create-stack.outputs.BucketName }}
+        run: |
+          if $DEBUG; then set -x; fi
+
+          chmod +x ./flag_setup.sh
+          ./flag_setup.sh

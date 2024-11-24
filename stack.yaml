@@ -1,0 +1,323 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deployment for the Cloudy CTF challenge
+
+Resources:
+  # S3 Bucket
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${Prefix}-bucket'
+      AccessControl: BucketOwnerFullControl
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      # CORS Allow everything
+      CorsConfiguration:
+        CorsRules:
+            AllowedMethods:
+              - POST
+              - PUT
+            AllowedOrigins:
+              - "*"
+            MaxAge: 3000
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .csv
+            Function: !GetAtt CSVProcessorLambda.Arn
+    DependsOn: S3PermissionForLambda
+
+  # Allow public file uploads
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${Prefix}-bucket/*'
+            Principal: "*"
+
+  # DynamoDB Table to store data from user uploaded CSV files
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${Prefix}-table'
+      AttributeDefinitions:
+        - AttributeName: Name
+          AttributeType: S
+        - AttributeName: Date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Name
+          KeyType: HASH
+        - AttributeName: Date
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub '${Prefix}-lambda-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Allow access to DynamoDB
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt DynamoDBTable.Arn
+              # Allow read access to S3 bucket
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  # Raw name to avoid circular dependency
+                  - !Sub 'arn:aws:s3:::${Prefix}-bucket/*'
+              # Logs permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  # Lambda function to process CSV files
+  CSVProcessorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Prefix}-processor-lambda'
+      Runtime: python3.10
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import datetime
+          import json
+          import re
+          import csv
+          import os
+
+          # Initialize DynamoDB client
+          dynamodb = boto3.client('dynamodb')
+          table_name = os.environ['TABLE_NAME']
+
+          def s3_to_dynamodb(records):
+            for record in records:
+              bucket_name = record['s3']['bucket']['name']
+              file_key = record['s3']['object']['key']
+
+              s3 = boto3.client('s3')
+              obj = s3.get_object(Bucket=bucket_name, Key=file_key)
+              data = obj['Body'].read().decode('utf-8')
+
+              current_date = datetime.datetime.now().isoformat()
+
+              csv_reader = csv.DictReader(data.splitlines())
+              for row in csv_reader:
+                name = row.get('Name')
+                secret = row.get('Secret')
+                if name and secret:
+                  dynamodb.put_item(
+                    TableName=table_name,
+                    Item={
+                      'Name': {'S': name},
+                      'Secret': {'S': secret},
+                      'Date': {'S': current_date}
+                    }
+                  )
+
+          def query_dynamodb(search):
+            scan_filter = '''
+              {
+                "Name": {
+                  "ComparisonOperator": "EQ",
+                  "AttributeValueList": [{"S": "%s"}]
+                }
+              }
+            ''' % search
+
+            response = dynamodb.scan(
+              TableName=table_name,
+              ScanFilter=json.loads(scan_filter)
+            )
+
+            # Get the first item only
+            if 'Items' in response and len(response['Items']) > 0:
+              return response['Items'][0]["Secret"]["S"]
+
+            return None
+
+          def lambda_handler(event, context):
+            # If the event is from S3, add data into DynamoDB
+            if 'Records' in event and any(record['eventSource'] == 'aws:s3' for record in event['Records']):
+              s3_to_dynamodb(event['Records'])
+              return {"statusCode": 200, "body": {"result": "Success"}}
+
+            # If the event is from the function URL or from direct invoke, attempt to query DynamoDB
+            search = None
+            if 'body' not in event:
+              return {"statusCode": 400, "body": {"error": "Invalid search query"}}
+
+            try:
+              _body = json.loads(event.get('body'))
+              search = _body.get('search')
+              is_raw = event.get('isRaw')
+
+              if not is_raw and not re.match(r'^[a-zA-Z0-9_]+$', search):
+                return {"statusCode": 400, "body": {"error": "Invalid search query"}}
+            except:
+              pass
+
+            if not search:
+              return {"statusCode": 400, "body": {"error": "No search query provided"}}
+            
+            secret = query_dynamodb(search)
+
+            return {"statusCode": 200, "body": {"result": secret}}
+
+      Timeout: 30
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DynamoDBTable
+
+  # URL to invoke the Lambda function
+  LambdaFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt CSVProcessorLambda.Arn
+      AuthType: NONE
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowMethods: ['GET', 'POST']
+        AllowHeaders: ['Content-Type']
+
+  # Permission to allow S3 to invoke Lambda
+  S3PermissionForLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CSVProcessorLambda
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref "AWS::AccountId"
+      SourceArn: !Sub 'arn:aws:s3:::${Prefix}-bucket'
+
+  # Allow public access to the Lambda function URL
+  LambdaPublicAccessPolicy:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CSVProcessorLambda
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  # IAM Role for the EC2 instance
+  EC2LambdaAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaListAndGetPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:ListFunctions
+                  - lambda:GetFunction
+                  - lambda:InvokeFunction
+                Resource: "*"
+
+  # Instance Profile for the EC2 instance
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2LambdaAccessRole
+
+  # Security Group for the EC2 instance
+  EC2InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow all traffic
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+
+  # EC2 Instance
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      KeyName: Ctf-Cloudy # Keypair for deploy action
+      SecurityGroupIds:
+        - !Ref EC2InstanceSecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      ImageId: ami-0584590e5f0e97daa # Debian 12 x86_64
+
+  # Elastic IP Association
+  ElasticIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !Ref ElasticIPAllocationId
+      InstanceId: !Ref EC2Instance
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: ctf-cloudy
+    Description: Prefix for the resource names
+  ElasticIPAllocationId:
+    Type: String
+    Default: eipalloc-04e606de031eded72
+    Description: Elastic IP Allocation ID
+
+Outputs:
+  BucketName:
+    Description: Name of the S3 bucket
+    Value: !Ref S3Bucket
+  TableName:
+    Description: Name of the DynamoDB table
+    Value: !Ref DynamoDBTable
+  LambdaFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref CSVProcessorLambda
+  LambdaFunctionUrl:
+    Description: URL to invoke the Lambda function
+    Value: !GetAtt LambdaFunctionUrl.FunctionUrl
+  EC2InstancePublicIP:
+    Description: Public IP address of the EC2 instance
+    Value: !GetAtt EC2Instance.PublicIp
