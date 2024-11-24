@@ -19,7 +19,7 @@ for i in {1..10} ; do
 done
 
 # Upload to S3
-curl -X POST http://$S3_BUCKET_NAME.s3.amazonaws.com/ \
+curl -X POST http://$S3_BUCKET_NAME.s3.eu-central-1.amazonaws.com/ \
      -F "key=$NAME" \
      -F "file=@$NAME" \
      -F "Content-Type=text/plain"
