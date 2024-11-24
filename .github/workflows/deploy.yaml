@@ -153,6 +153,11 @@ jobs:
       DEBUG: false
 
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Put flag
         run: |
           if $DEBUG; then set -x; fi
