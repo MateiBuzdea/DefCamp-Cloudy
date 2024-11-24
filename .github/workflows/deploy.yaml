@@ -96,12 +96,9 @@ jobs:
         uses: aws-actions/aws-cloudformation-github-deploy@v1
         with:
           name: ${{ env.PREFIX }}
-          region: eu-central-1
           capabilities: CAPABILITY_NAMED_IAM
           template: ./stack.yaml
-          parameters: |
-            Prefix=${{ env.PREFIX }}
-            ElasticIPAllocationId=${{ env.IP_ALLOCATION_ID }}
+          parameter-overrides: "Prefix=${{ env.PREFIX }},ElasticIPAllocationId=${{ env.IP_ALLOCATION_ID }}"
 
       - name: Deploy Nginx to EC2
         run: |
@@ -125,15 +122,15 @@ jobs:
           fi
 
           # Install dependencies
-          ssh -o StrictHostKeyChecking=no -i /tmp/id_rsa $SSH_USER@$IP << EOF
+          ssh -o StrictHostKeyChecking=no -i /tmp/id_rsa $SSH_USER@$REMOTE_HOST << EOF
             sudo apt-get update
             sudo apt-get install -y nginx
             sudo cp /home/$SSH_USER/.ssh/authorized_keys /root/.ssh/authorized_keys
           EOF
 
           # Copy source files
-          scp -o StrictHostKeyChecking=no -i /tmp/id_rsa ./nginx.conf root@$IP:/etc/nginx/nginx.conf
-          scp -o StrictHostKeyChecking=no -i /tmp/id_rsa ./index.html root@$IP:/tmp/index.html
+          scp -o StrictHostKeyChecking=no -i /tmp/id_rsa ./nginx.conf root@$REMOTE_HOST:/etc/nginx/nginx.conf
+          scp -o StrictHostKeyChecking=no -i /tmp/id_rsa ./index.html root@$REMOTE_HOST:/tmp/index.html
 
           # Configure and start Nginx
           ssh -o StrictHostKeyChecking=no -i /tmp/id_rsa root@$REMOTE_HOST << EOF
