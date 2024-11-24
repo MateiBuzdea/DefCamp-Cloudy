@@ -44,9 +44,10 @@ jobs:
         id: check-stack
         continue-on-error: true
         run: |
-          STACK_OUTPUT=$(aws cloudformation describe-stacks --stack-name $PREFIX 2>&1)
+          STATUS=0
+          STACK_OUTPUT=$(aws cloudformation describe-stacks --stack-name $PREFIX 2>&1 || STATUS=$?)
 
-          if [ $? -eq 0 ]; then
+          if [ $STATUS -eq 0 ]; then
             echo "Stack $PREFIX already exists"
             echo "Deleting stack $PREFIX"
             aws s3 rm s3://$PREFIX-bucket --recursive

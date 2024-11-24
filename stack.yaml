@@ -16,15 +16,6 @@ Resources:
         BlockPublicPolicy: false
         IgnorePublicAcls: false
         RestrictPublicBuckets: false
-      # CORS Allow everything
-      CorsConfiguration:
-        CorsRules:
-            AllowedMethods:
-              - POST
-              - PUT
-            AllowedOrigins:
-              - "*"
-            MaxAge: 3000
       NotificationConfiguration:
         LambdaConfigurations:
           - Event: s3:ObjectCreated:*
@@ -212,10 +203,6 @@ Resources:
     Properties:
       TargetFunctionArn: !GetAtt CSVProcessorLambda.Arn
       AuthType: NONE
-      CorsConfiguration:
-        AllowOrigins: ['*']
-        AllowMethods: ['GET', 'POST']
-        AllowHeaders: ['Content-Type']
 
   # Permission to allow S3 to invoke Lambda
   S3PermissionForLambda:
