@@ -50,9 +50,11 @@ jobs:
           if [ $STATUS -eq 0 ]; then
             echo "Stack $PREFIX already exists"
             echo "Deleting stack $PREFIX"
-            aws s3 rm s3://$PREFIX-bucket --recursive
-            aws cloudformation delete-stack --stack-name $PREFIX
+
+            aws s3 rm s3://$PREFIX-bucket --recursive || echo "Bucket $PREFIX-bucket does not exist"
+            aws cloudformation delete-stack --stack-name $PREFIX || echo "Failed to delete stack $PREFIX"
             aws cloudformation wait stack-delete-complete --stack-name $PREFIX
+
             echo "Stack $PREFIX deleted"
           else
             echo "Stack $PREFIX does not exist"
