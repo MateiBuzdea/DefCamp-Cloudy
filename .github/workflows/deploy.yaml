@@ -64,6 +64,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: cleanup
 
+    outputs:
+      S3_BUCKET_NAME: ${{ steps.create-stack.outputs.BucketName }}
+
     env:
       IP_ALLOCATION_ID: ${{ github.event.inputs.IPAllocationId }}
       PREFIX: ${{ github.event.inputs.Prefix }}
@@ -140,10 +143,17 @@ jobs:
             sudo systemctl restart nginx
           EOF
 
+  flag-setup:
+    runs-on: ubuntu-latest
+    needs: deploy
+
+    env:
+      S3_BUCKET_NAME: ${{ needs.deploy.outputs.S3_BUCKET_NAME }}
+      FLAG: ${{ secrets.FLAG }}
+      DEBUG: false
+
+    steps:
       - name: Put flag
-        env:
-          FLAG: ${{ secrets.FLAG }}
-          S3_BUCKET_NAME: ${{ steps.create-stack.outputs.BucketName }}
         run: |
           if $DEBUG; then set -x; fi
 
