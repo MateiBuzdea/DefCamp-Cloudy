@@ -18,9 +18,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      IP_ALLOCATION_ID: ${{ github.event.inputs.IPAllocationId }}
       PREFIX: ${{ github.event.inputs.Prefix }}
-      SSH_USER: admin
       AWS_REGION: eu-central-1
       DEBUG: false
 
@@ -54,12 +52,14 @@ jobs:
             aws s3 rm s3://$PREFIX-bucket --recursive
             aws cloudformation delete-stack --stack-name $PREFIX
             aws cloudformation wait stack-delete-complete --stack-name $PREFIX
+            echo "Stack $PREFIX deleted"
           else
             echo "Stack $PREFIX does not exist"
           fi
 
   deploy:
     runs-on: ubuntu-latest
+    needs: cleanup
 
     env:
       IP_ALLOCATION_ID: ${{ github.event.inputs.IPAllocationId }}
@@ -92,24 +92,24 @@ jobs:
         id: create-stack
         uses: aws-actions/aws-cloudformation-github-deploy@v1
         with:
-          name: $PREFIX
+          name: ${{ env.PREFIX }}
           region: eu-central-1
           capabilities: CAPABILITY_NAMED_IAM
           template: ./stack.yaml
           parameters: |
-            Prefix=$PREFIX
-            ElasticIPAllocationId=$IP_ALLOCATION_ID
+            Prefix=${{ env.PREFIX }}
+            ElasticIPAllocationId=${{ env.IP_ALLOCATION_ID }}
 
       - name: Deploy Nginx to EC2
         run: |
           if $DEBUG; then set -x; fi
 
           # Get the outputs from the CloudFormation stack step
-          LAMBDA_FUNCTION_URL=${{ steps.create-stack.outputs.LambdaFunctionUrl }}
-          S3_BUCKET_NAME=${{ steps.create-stack.outputs.BucketName }}
-          REMOTE_HOST=${{ steps.create-stack.outputs.EC2InstancePublicIP }}
+          export LAMBDA_FUNCTION_URL=${{ steps.create-stack.outputs.LambdaFunctionUrl }}
+          export S3_BUCKET_NAME=${{ steps.create-stack.outputs.BucketName }}
+          export REMOTE_HOST=${{ steps.create-stack.outputs.EC2InstancePublicIP }}
 
-          LAMBDA_FUNCTION_URL_ID=$(echo $LAMBDA_FUNCTION_URL | cut -d'/' -f3 | cut -d'.' -f1)
+          export LAMBDA_FUNCTION_URL_ID=$(echo $LAMBDA_FUNCTION_URL | cut -d'/' -f3 | cut -d'.' -f1)
 
           if [ -z "$LAMBDA_FUNCTION_URL_ID" ]; then
             echo "Stack creation did not return a valid Lambda function URL ID"
